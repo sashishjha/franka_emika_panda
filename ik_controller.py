@@ -120,14 +120,31 @@ def ik_step(target_pos):
     mujoco.mj_jacBody(model, data, jacp, jacr, hand_id)
     J = np.vstack([jacp[:, :7], jacr[:, :7]])   # (6, 7)
 
-    A  = J @ J.T + (LAMBDA**2) * np.eye(6)
-    dq = J.T @ np.linalg.solve(A, error)
+    # --- Upgraded DLS with Nullspace Projection ---
+    # 1. Damped pseudo-inverse
+    A = J @ J.T + (LAMBDA**2) * np.eye(6)
+    J_pinv = J.T @ np.linalg.solve(A, np.eye(6))
+    
+    # 2. Primary task: move hand to target
+    dq_task = J_pinv @ error
+    
+    # 3. Secondary task: pull elbow/joints back to HOME pose
+    I = np.eye(7)
+    nullspace_proj = I - (J_pinv @ J)
+    q_error = HOME - data.qpos[:7]
+    dq_null = nullspace_proj @ (0.05 * q_error)  # 0.05 is the pull strength
+    
+    # Combine both tasks
+    dq = dq_task + dq_null
+    # ----------------------------------------------
 
     if np.linalg.norm(pos_error) > 0.1:
         dq *= 0.3
 
     dq = np.clip(dq, -MAX_DCTRL, MAX_DCTRL)
-    data.ctrl[:7] += dq
+    
+    # THE WINDUP FIX: Anchor command to physical state
+    data.ctrl[:7] = data.qpos[:7] + dq
 
     return np.linalg.norm(pos_error), np.linalg.norm(ori_error)
 
@@ -155,6 +172,11 @@ def move_to(target_pos, viewer, max_steps=20000):
             viewer.sync()
         if pos_err < POS_TOL and ori_err < ORI_TOL:
             break
+        
+        # Add this warning
+        if i == max_steps - 1:
+            print(f"    [WARNING] move_to timed out! pos_err={pos_err:.4f}, ori_err={ori_err:.4f}")
+            
     return pos_err, ori_err
 
 def pause(viewer, steps=400):
@@ -235,15 +257,18 @@ def pick_and_place_to(cube_id, place_xyz, viewer):
         move_to(above(cube_id, GRASP_HEIGHT - 0.01), viewer, max_steps=30000)
     
     # 4. Now close gripper slowly around the cube, THEN activate weld
-    data.ctrl[7] = 180      # close partway first
-    pause(viewer, 300)
-    data.ctrl[7] = 0        # fully closed
-    pause(viewer, 400)
-    
-    # 5. Activate weld only after gripper is closed
+    # 4. Activate weld FIRST to lock physics, THEN close gripper visually
     attach(cube_id)
-    pause(viewer, 300)      # settle weld
+    pause(viewer, 50)       # let weld settle
+    
+    data.ctrl[7] = 180      # close partway
+    pause(viewer, 100)
+    data.ctrl[7] = 0        # fully closed
+    pause(viewer, 200)
+    
     MAX_DCTRL = 0.003
+    
+   
 
     # 4. Lift
     hand_now       = data.xpos[hand_id].copy()
