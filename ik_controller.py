@@ -1,5 +1,20 @@
 # ik_controller_vla.py
 # Run with: mjpython ik_controller_vla.py
+#
+# ROOT CAUSE FIXES vs all previous versions:
+#
+# BUG 1 (weld teleports cube): eq_data for a MuJoCo weld has 10 entries:
+#   [anchor1_in_body1(3), anchor2_in_body2(3), rel_quat(4)]
+#   All previous versions wrote quat to [3:7], clobbering anchor2 and quat[0].
+#   Fix: eq_data[0:3]=rel_pos, eq_data[3:6]=[0,0,0], eq_data[6:10]=rel_quat
+#
+# BUG 2 (arm never descends): descend_to used dctrl_override=0.02 with only
+#   3000 steps per 3mm waypoint. The IK dq is norm-clipped to 0.02, and with
+#   GAIN_POS=0.85 and even a 3mm residual the convergence is too slow.
+#   Fix: use full MAX_DCTRL (no override) for waypoints -- safety comes from
+#   the 3mm step SIZE, not from slowing joint motion.
+#
+# BUG 3 (grasp check wrong): replaced absolute dist with delta follow-ratio.
 
 import mujoco
 import mujoco.viewer
@@ -21,13 +36,12 @@ POS_TOL       = 0.008
 ORI_TOL       = 0.10
 IK_EVERY      = 5
 FINGER_OFFSET = 0.10
-DESCENT_STEP  = 0.003
+DESCENT_STEP  = 0.005   # 5mm steps during descent
 GRIPPER_OPEN        = 255
 GRIPPER_CLOSE_FIRM  = 10
 GRIPPER_STEP        = 3
 
 DESIRED_ZAXIS = np.array([0.0, 0.0, -1.0])
-
 JOINT_LOW  = np.array([-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973])
 JOINT_HIGH = np.array([ 2.8973,  1.7628,  2.8973, -0.0698,  2.8973,  3.7525,  2.8973])
 
@@ -81,46 +95,52 @@ reset_to_home()
 print("Warming up physics...")
 for _ in range(2000):
     mujoco.mj_step(model, data)
-print(f"Gripper ctrl=255 → qpos[7]={data.qpos[7]:.4f}  (expect ~0.04 = open)")
+print(f"Home hand z={data.xpos[hand_id][2]:.4f}  "
+      f"gripper qpos={data.qpos[7]:.4f} (expect ~0.04=open)")
+
+# Verify eq_data size for welds
+wid0 = list(WELDS.values())[0]
+print(f"eq_data shape for weld: {model.eq_data[wid0].shape}  "
+      f"(expect 11, entries [0:3]=anchor1, [3:6]=anchor2, [6:10]=quat)")
 
 # ══════════════════════════════════════════════════════════════
 #  IK
 # ══════════════════════════════════════════════════════════════
-def ik_step(target_pos, step_limit=None):
+def ik_step(target_pos, step_limit=MAX_DCTRL):
     hand_pos  = data.xpos[hand_id].copy()
     pos_error = target_pos - hand_pos
-    R          = data.xmat[hand_id].reshape(3, 3)
-    ori_error  = np.cross(R[:, 2], DESIRED_ZAXIS)
-    error = np.concatenate([GAIN_POS * pos_error, GAIN_ORI * ori_error])
+    R         = data.xmat[hand_id].reshape(3, 3)
+    ori_error = np.cross(R[:, 2], DESIRED_ZAXIS)
+    error     = np.concatenate([GAIN_POS * pos_error, GAIN_ORI * ori_error])
 
     jacp = np.zeros((3, model.nv))
     jacr = np.zeros((3, model.nv))
     mujoco.mj_jacBody(model, data, jacp, jacr, hand_id)
-    J = np.vstack([jacp[:, :7], jacr[:, :7]])
+    J      = np.vstack([jacp[:, :7], jacr[:, :7]])
     A      = J @ J.T + (LAMBDA**2) * np.eye(6)
     J_pinv = J.T @ np.linalg.solve(A, np.eye(6))
-    dq_task = J_pinv @ error
+    dq     = J_pinv @ error
 
-    nullspace_proj = np.eye(7) - (J_pinv @ J)
-    q          = data.qpos[:7]
-    q_mid      = (JOINT_LOW + JOINT_HIGH) / 2.0
-    q_range    = JOINT_HIGH - JOINT_LOW
-    limit_grad = -2.0 * (q - q_mid) / (q_range ** 2)
-    pos_norm   = np.linalg.norm(pos_error)
-    dq_null    = nullspace_proj @ (0.08 * (HOME - q) + 0.04 * limit_grad)
-    vel_damp   = -DAMP_VEL * data.qvel[:7]
-    dq = dq_task + dq_null + vel_damp
+    null_proj = np.eye(7) - (J_pinv @ J)
+    q         = data.qpos[:7]
+    q_mid     = (JOINT_LOW + JOINT_HIGH) / 2.0
+    q_range   = JOINT_HIGH - JOINT_LOW
+    lim_grad  = -2.0 * (q - q_mid) / (q_range ** 2)
+    dq       += null_proj @ (0.08 * (HOME - q) + 0.04 * lim_grad)
+    dq       += -DAMP_VEL * data.qvel[:7]
+
+    pos_norm = np.linalg.norm(pos_error)
     if pos_norm > 0.1:
         dq *= 0.3
 
-    max_step = MAX_DCTRL if step_limit is None else float(step_limit)
     dq_norm = np.linalg.norm(dq)
-    if dq_norm > max_step:
-        dq = dq * (max_step / dq_norm)
+    if dq_norm > step_limit:
+        dq = dq * (step_limit / dq_norm)
+
     return dq, pos_norm, np.linalg.norm(ori_error)
 
 # ══════════════════════════════════════════════════════════════
-#  PRIMITIVES
+#  MOTION PRIMITIVES
 # ══════════════════════════════════════════════════════════════
 def body_pos(body_id):
     return data.xpos[body_id].copy()
@@ -130,8 +150,7 @@ def above(body_id, extra_z=0.0):
     p[2] += FINGER_OFFSET + extra_z
     return p
 
-def move_to(target_pos, viewer, max_steps=30000, dctrl_override=None):
-    step_limit = MAX_DCTRL if dctrl_override is None else float(dctrl_override)
+def move_to(target_pos, viewer, max_steps=30000, step_limit=MAX_DCTRL):
     pos_err = ori_err = 999.0
     for i in range(max_steps):
         if not viewer.is_running():
@@ -149,30 +168,31 @@ def move_to(target_pos, viewer, max_steps=30000, dctrl_override=None):
     pause(viewer, 50)
     return pos_err, ori_err
 
-def pause(viewer, steps=400):
+def pause(viewer, steps=200):
     for _ in range(steps):
         if not viewer.is_running():
             break
         mujoco.mj_step(model, data)
         viewer.sync()
 
-def open_gripper(viewer, steps=300):
+def open_gripper(viewer, steps=200):
     data.ctrl[7] = GRIPPER_OPEN
     pause(viewer, steps)
 
 def go_home(viewer, steps=1500):
-    data.ctrl[:7] = data.qpos[:7].copy()
+    """Interpolate to HOME then hard-snap ctrl."""
+    q0 = data.qpos[:7].copy()
+    data.ctrl[:7] = q0
     for i in range(steps):
         if not viewer.is_running():
             break
         alpha = (i + 1) / steps
-        data.ctrl[:7] = (1.0 - alpha) * data.qpos[:7] + alpha * HOME
+        data.ctrl[:7] = (1.0 - alpha) * q0 + alpha * HOME
         mujoco.mj_step(model, data)
         if i % 5 == 0:
             viewer.sync()
-    # Hard snap to kill windup
-    data.ctrl[:7] = HOME.copy()
-    pause(viewer, 200)
+    data.ctrl[:7] = HOME.copy()   # hard snap — kills windup
+    pause(viewer, 300)
 
 def detach_all():
     for wid in WELDS.values():
@@ -180,25 +200,35 @@ def detach_all():
         data.eq_active[wid]   = 0
 
 def descend_to(target_pos, viewer):
+    """
+    Descend in DESCENT_STEP-sized waypoints using FULL step_limit (MAX_DCTRL).
+    Safety comes from small spatial steps, NOT from slowing joint motion.
+    dctrl_override was the bug: it made IK converge too slowly per waypoint.
+    """
     hand_now = data.xpos[hand_id].copy()
     dz = target_pos[2] - hand_now[2]
-    n_waypoints = max(1, int(abs(dz) / DESCENT_STEP))
-    for i in range(1, n_waypoints + 1):
-        alpha = i / n_waypoints
+    n_wp = max(1, int(abs(dz) / DESCENT_STEP))
+    print(f"    [DESCEND] from z={hand_now[2]:.4f} to z={target_pos[2]:.4f}  "
+          f"dz={dz:.4f}  waypoints={n_wp}")
+    for i in range(1, n_wp + 1):
+        alpha = i / n_wp
         wp = hand_now + alpha * (target_pos - hand_now)
-        move_to(wp, viewer, max_steps=3000, dctrl_override=0.02)
-    return move_to(target_pos, viewer, max_steps=8000, dctrl_override=0.015)
+        move_to(wp, viewer, max_steps=4000, step_limit=MAX_DCTRL)  # full speed
+    return move_to(target_pos, viewer, max_steps=8000, step_limit=MAX_DCTRL)
 
 # ══════════════════════════════════════════════════════════════
-#  WELD — correct relpose computation using mju_mat2Quat
+#  WELD — CORRECT eq_data layout
 # ══════════════════════════════════════════════════════════════
 def attach_after_close(cube_id):
     """
-    Compute hand→cube relative transform at the moment of contact,
-    then activate the weld with that exact relpose.
+    MuJoCo weld eq_data has 11 entries (indices 0..10):
+      [0:3]  anchor1 in body1 (hand) frame
+      [3:6]  anchor2 in body2 (cube) frame  ← MUST be [0,0,0] for rigid attach
+      [6:10] relative quaternion [w,x,y,z]  ← body2 orient in body1 frame
+      [10]   torque scale (ignored here)
 
-    MuJoCo weld eq_data[0:7] = [px, py, pz, qw, qx, qy, qz]
-    where (p, q) is the pose of body2 (cube) in body1 (hand) frame.
+    Previous versions wrote quat to [3:7], corrupting anchor2 and quat[0],
+    which teleported the cube to a random location ~1m away.
     """
     detach_all()
     mujoco.mj_forward(model, data)
@@ -208,131 +238,125 @@ def attach_after_close(cube_id):
     cube_pos = data.xpos[cube_id].copy()
     cube_mat = data.xmat[cube_id].reshape(3, 3)
 
-    # Position of cube in hand frame
+    # anchor1: cube origin expressed in hand frame
     rel_pos = hand_mat.T @ (cube_pos - hand_pos)
 
-    # Orientation of cube in hand frame
-    rel_mat = hand_mat.T @ cube_mat
+    # relative orientation: cube frame expressed in hand frame
+    rel_mat  = hand_mat.T @ cube_mat
     rel_quat = np.zeros(4)
     mujoco.mju_mat2Quat(rel_quat, rel_mat.flatten())
 
     wid = WELDS[cube_id]
-    model.eq_data[wid, 0:3] = rel_pos
-    model.eq_data[wid, 3:7] = rel_quat
+    model.eq_data[wid, 0:3] = rel_pos          # anchor1 in hand frame
+    model.eq_data[wid, 3:6] = [0.0, 0.0, 0.0] # anchor2 in cube frame = origin
+    model.eq_data[wid, 6:10] = rel_quat        # relative quat [w,x,y,z]
 
     model.eq_active0[wid] = 1
     data.eq_active[wid]   = 1
     mujoco.mj_forward(model, data)
-    print(f"    [WELD] rel_pos={np.round(rel_pos,4)}  |r|={np.linalg.norm(rel_pos):.4f}")
+
+    cname = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, cube_id)
+    print(f"    [WELD ON] {cname}  anchor1={np.round(rel_pos,4)}  "
+          f"|anchor1|={np.linalg.norm(rel_pos):.4f}")
 
 # ══════════════════════════════════════════════════════════════
 #  CONTACT SENSING
 # ══════════════════════════════════════════════════════════════
 def _geoms_for_body(body_id):
-    start = model.body_geomadr[body_id]
-    count = model.body_geomnum[body_id]
-    return set(range(start, start + count))
+    s = model.body_geomadr[body_id]
+    return set(range(s, s + model.body_geomnum[body_id]))
 
 _FINGER_GEOMS = set()
 for _i in range(model.nbody):
-    _bname = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, _i) or ""
-    if any(kw in _bname.lower() for kw in ["finger", "pad", "panda_hand", "gripper"]):
+    _n = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, _i) or ""
+    if any(k in _n.lower() for k in ["finger", "pad", "panda_hand", "gripper"]):
         _FINGER_GEOMS |= _geoms_for_body(_i)
 
-if not _FINGER_GEOMS:
-    print("[WARNING] No finger geoms found — stall detection only")
-else:
-    print(f"Finger geom IDs: {_FINGER_GEOMS}")
+print(f"Finger geom IDs ({len(_FINGER_GEOMS)}): {_FINGER_GEOMS}" if _FINGER_GEOMS
+      else "[WARNING] No finger geoms found")
 
-def fingers_touching_cube(cube_id, require_both=False):
+def fingers_touching_cube(cube_id):
     cube_geoms = _geoms_for_body(cube_id)
-    hits = 0
     for i in range(data.ncon):
         c = data.contact[i]
         g1, g2 = c.geom1, c.geom2
         if (g1 in _FINGER_GEOMS and g2 in cube_geoms) or \
            (g2 in _FINGER_GEOMS and g1 in cube_geoms):
-            hits += 1
-    return hits >= (2 if require_both else 1)
+            return True
+    return False
 
 # ══════════════════════════════════════════════════════════════
 #  CLOSE GRIPPER → WELD
 # ══════════════════════════════════════════════════════════════
 def close_and_weld(cube_id, viewer, max_iter=120):
     current   = float(data.ctrl[7])
-    min_ctrl  = float(GRIPPER_CLOSE_FIRM)
     prev_fpos = data.qpos[7]
     welded    = False
 
     for step in range(max_iter):
         if not viewer.is_running():
             break
-        current      = max(current - GRIPPER_STEP, min_ctrl)
+        current      = max(current - GRIPPER_STEP, float(GRIPPER_CLOSE_FIRM))
         data.ctrl[7] = current
 
-        contact_found = False
+        hit = False
         for inner in range(8):
             mujoco.mj_step(model, data)
-            if _FINGER_GEOMS and fingers_touching_cube(cube_id, require_both=False):
-                print(f"    [GRIPPER] Geom contact ctrl={current:.0f} inner={inner}")
+            if _FINGER_GEOMS and fingers_touching_cube(cube_id):
+                print(f"    [GRIPPER] Contact  ctrl={current:.0f}  inner={inner}")
                 attach_after_close(cube_id)
-                pause(viewer, 150)
+                pause(viewer, 200)
                 welded = True
-                contact_found = True
+                hit    = True
                 break
-        if contact_found:
+        if hit:
             break
         viewer.sync()
 
         curr_fpos = data.qpos[7]
         if step > 4:
-            finger_moved = abs(curr_fpos - prev_fpos)
-            if finger_moved < 0.0003 and current < (GRIPPER_OPEN - 30):
-                print(f"    [GRIPPER] Stall ctrl={current:.0f}  delta={finger_moved:.5f}")
+            if abs(curr_fpos - prev_fpos) < 0.0003 and current < GRIPPER_OPEN - 30:
+                print(f"    [GRIPPER] Stall  ctrl={current:.0f}")
                 attach_after_close(cube_id)
-                pause(viewer, 150)
+                pause(viewer, 200)
                 welded = True
                 break
         prev_fpos = curr_fpos
 
     if not welded:
-        print(f"    [GRIPPER] No contact after {max_iter} iters — force-close weld")
-        data.ctrl[7] = min_ctrl
-        pause(viewer, 200)
+        print(f"    [GRIPPER] No contact — force close and weld")
+        data.ctrl[7] = GRIPPER_CLOSE_FIRM
+        pause(viewer, 300)
         attach_after_close(cube_id)
-        welded = True
-
-    return welded
 
 # ══════════════════════════════════════════════════════════════
-#  GRASP VERIFICATION — delta-based, not absolute distance
+#  GRASP CHECK — delta-based (immune to weld offset magnitude)
 # ══════════════════════════════════════════════════════════════
 def grasp_held(cube_id, viewer, lift_dist=0.04):
     """
-    Lift slowly. A successful grasp means the cube's Z rises with the hand.
-    We measure follow_ratio = cube_dz / hand_dz; threshold > 0.5.
-    This is immune to weld offset magnitude.
+    Lift slowly. A held cube rises with the hand (follow_ratio ≈ 1).
+    A dropped cube stays put (follow_ratio ≈ 0).
     """
     pause(viewer, 400)
-    hand_before = data.xpos[hand_id].copy()
-    cube_before = data.xpos[cube_id].copy()
+    hz0 = data.xpos[hand_id][2]
+    cz0 = data.xpos[cube_id][2]
 
-    lift_target = hand_before.copy()
-    lift_target[2] += lift_dist
-    move_to(lift_target, viewer, max_steps=10000, dctrl_override=0.008)
+    lift = data.xpos[hand_id].copy()
+    lift[2] += lift_dist
+    # Slow lift — won't snap weld
+    move_to(lift, viewer, max_steps=12000, step_limit=0.008)
     pause(viewer, 100)
 
-    hand_after = data.xpos[hand_id].copy()
-    cube_after = data.xpos[cube_id].copy()
-
-    hand_dz = hand_after[2] - hand_before[2]
-    cube_dz = cube_after[2] - cube_before[2]
-    follow_ratio = (cube_dz / hand_dz) if hand_dz > 0.005 else 0.0
+    hz1 = data.xpos[hand_id][2]
+    cz1 = data.xpos[cube_id][2]
+    h_dz = hz1 - hz0
+    c_dz = cz1 - cz0
+    ratio = (c_dz / h_dz) if h_dz > 0.005 else 0.0
 
     cname = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, cube_id)
-    print(f"    [GRASP CHECK] {cname}  hand_dz={hand_dz:.4f}  "
-          f"cube_dz={cube_dz:.4f}  follow={follow_ratio:.2f}")
-    return follow_ratio > 0.5
+    print(f"    [GRASP CHECK] {cname}  hand_dz={h_dz:.4f}  "
+          f"cube_dz={c_dz:.4f}  follow={ratio:.2f}  held={ratio > 0.5}")
+    return ratio > 0.5
 
 # ══════════════════════════════════════════════════════════════
 #  PICK & PLACE
@@ -340,78 +364,81 @@ def grasp_held(cube_id, viewer, lift_dist=0.04):
 def pick_and_place_to(cube_id, place_xyz, viewer):
     place_xyz = np.array(place_xyz, dtype=float)
     cname = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, cube_id)
-    print(f"\n  pick_and_place: {cname} → {np.round(place_xyz, 3)}")
+    print(f"\n  pick_and_place: {cname} → {np.round(place_xyz,3)}")
 
     for attempt in range(3):
         if attempt > 0:
-            print(f"    [RETRY] attempt {attempt + 1}/3")
+            print(f"    [RETRY] attempt {attempt+1}/3")
             detach_all()
             open_gripper(viewer, 200)
-            go_home(viewer, 1500)
+            go_home(viewer)
 
+        # Resync ctrl to current qpos — kills any windup
         data.ctrl[:7] = data.qpos[:7].copy()
 
+        # ── 1. Open + hover ───────────────────────────────────────────────────
         open_gripper(viewer, 100)
         detach_all()
+        move_to(above(cube_id, HOVER_HEIGHT), viewer, max_steps=30000)
+        pause(viewer, 200)
 
-        hover_target = above(cube_id, HOVER_HEIGHT)
-        move_to(hover_target, viewer, max_steps=30000)
-        pause(viewer, 300)
-
+        # ── 2. Descend ────────────────────────────────────────────────────────
         grasp_target = above(cube_id, GRASP_HEIGHT)
         descend_to(grasp_target, viewer)
 
+        # Diagnostic
         hand_z    = data.xpos[hand_id][2]
         cube_z    = data.xpos[cube_id][2]
         tip_z     = hand_z - FINGER_OFFSET
         gap       = tip_z - (cube_z + 0.03)
-        R         = data.xmat[hand_id].reshape(3, 3)
-        ori_align = np.dot(R[:, 2], DESIRED_ZAXIS)
+        ori_align = np.dot(data.xmat[hand_id].reshape(3,3)[:,2], DESIRED_ZAXIS)
         print(f"    [PRE-GRASP] tip_z={tip_z:.4f}  cube_top={cube_z+0.03:.4f}"
               f"  gap={gap:+.4f}  ori_align={ori_align:.3f}")
 
+        # Extra nudge if too high
         if gap > 0.015:
-            extra = grasp_target.copy()
-            extra[2] -= (gap - 0.008)
-            extra[2]  = max(extra[2], cube_z + 0.028)
-            move_to(extra, viewer, max_steps=8000, dctrl_override=0.01)
+            nudge = grasp_target.copy()
+            nudge[2] = max(cube_z + 0.028, grasp_target[2] - (gap - 0.008))
+            move_to(nudge, viewer, max_steps=8000, step_limit=MAX_DCTRL)
             tip_z = data.xpos[hand_id][2] - FINGER_OFFSET
             gap   = tip_z - (cube_z + 0.03)
             print(f"    [NUDGE]     tip_z={tip_z:.4f}  gap={gap:+.4f}")
 
+        # ── 3. Close → weld ───────────────────────────────────────────────────
         close_and_weld(cube_id, viewer)
 
+        # ── 4. Verify ─────────────────────────────────────────────────────────
         if grasp_held(cube_id, viewer):
             break
-        else:
-            detach_all()
-            open_gripper(viewer, 100)
-            if attempt == 2:
-                print(f"    [ABORT] Could not grasp {cname} — skipping")
-                go_home(viewer, 800)
-                return
+        detach_all()
+        open_gripper(viewer, 100)
+        if attempt == 2:
+            print(f"    [ABORT] {cname} — skipping")
+            go_home(viewer)
+            return
 
-    hand_now = data.xpos[hand_id].copy()
-    transit  = hand_now.copy()
-    transit[2] = hand_now[2] + 0.22
+    # ── 5. Transport ──────────────────────────────────────────────────────────
+    transit = data.xpos[hand_id].copy()
+    transit[2] += 0.22
     move_to(transit, viewer)
 
-    approach    = place_xyz.copy()
+    approach = place_xyz.copy()
     approach[2] = place_xyz[2] + FINGER_OFFSET + HOVER_HEIGHT
     move_to(approach, viewer)
 
-    drop    = place_xyz.copy()
+    drop = place_xyz.copy()
     drop[2] = place_xyz[2] + FINGER_OFFSET + 0.01
     move_to(drop, viewer)
 
+    # ── 6. Release ────────────────────────────────────────────────────────────
     detach_all()
     open_gripper(viewer, 200)
     pause(viewer, 400)
 
-    retract    = data.xpos[hand_id].copy()
+    retract = data.xpos[hand_id].copy()
     retract[2] += 0.20
     move_to(retract, viewer)
-    go_home(viewer, 800)
+    go_home(viewer)
 
 # ══════════════════════════════════════════════════════════════
 #  TASKS
@@ -454,8 +481,7 @@ def stack_by_color(viewer):
 def place_in_bowls(viewer):
     print("\n-- TASK 4: Place each cube in its matching bowl --")
     for color, cube_ids in CUBES.items():
-        bowl_id  = BOWLS[color]
-        bowl_xy  = body_pos(bowl_id)[:2]
+        bowl_xy = body_pos(BOWLS[color])[:2]
         for layer, cube_id in enumerate(cube_ids):
             z = STACK_BASE_Z + layer * CUBE_HEIGHT
             pick_and_place_to(cube_id, [bowl_xy[0], bowl_xy[1], z], viewer)
