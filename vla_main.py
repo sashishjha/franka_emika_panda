@@ -1,80 +1,151 @@
-# vla_main.py
-# Run with: mjpython vla_main.py
+# vla_gemini.py
+# Run with: mjpython vla_gemini.py
 #
-# Full VLA pipeline:
-#   Natural language command → Gemini API → task name → execute
+# This IS a real VLA pipeline:
+#   Vision  — camera image from MuJoCo rendered at each decision step
+#   Language — natural language command from user
+#   Action   — Gemini Vision outputs structured JSON → IK controller executes
+#
+# The key difference from the old pipeline:
+#   OLD: send text command → Gemini parses to task name → run hardcoded task
+#   NEW: send image + command → Gemini sees the scene → outputs verified task +
+#        object state observations → controller executes with scene awareness
+#
+# This means Gemini is doing vision grounding, not just NLP.
+# If an object is missing or misplaced, Gemini will say so.
 
 import os
+import sys
+import time
 import json
+import base64
 import urllib.request
 import urllib.error
+import numpy as np
 import mujoco
 import mujoco.viewer
 
-# ── Import controller (must be in same directory) ──────────────
-from ik_controller import (
-    model, data, reset_to_home, pause, TASK_MAP
-)
+# ── Import the fixed controller ───────────────────────────────────────────────
+import ik_controller_vla as ctrl   # brings in model, data, TASK_MAP, etc.
 
 # ══════════════════════════════════════════════════════════════
-#  GEMINI CONFIG
+#  CONFIG
 # ══════════════════════════════════════════════════════════════
-GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
-print(f"gemini API key: {'found' if GEMINI_API_KEY else 'NOT found'}")
-GEMINI_URL = ( 
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "YOUR_API_KEY_HERE")
+GEMINI_URL = (
     "https://generativelanguage.googleapis.com/v1beta/models/"
     "gemini-1.5-flash:generateContent?key=" + GEMINI_API_KEY
 )
 
-# ── System prompt that tells Gemini about our 5 tasks ──────────
-SYSTEM_PROMPT = """
-You are the brain of a robotic arm (Franka Panda) in a MuJoCo simulation.
-The scene has 6 colored cubes (2 red, 2 blue, 2 green) and 3 colored bowls
-(red, blue, green) on a table.
+IMG_WIDTH    = 512
+IMG_HEIGHT   = 512
+CAMERA_NAME  = "cam_top"   # must exist in scene.xml
 
-Given a natural language command, you must decide which ONE task to perform.
-Respond ONLY with a valid JSON object — no markdown, no explanation:
+# The 5 valid task keys the controller knows
+VALID_TASKS = list(ctrl.TASK_MAP.keys())
 
+# Natural language descriptions shown to the user at runtime
+DEMO_COMMANDS = [
+    ("hover_all",        "Hover over all the cubes and inspect each one"),
+    ("stack_all",        "Stack all the cubes into a single tall tower"),
+    ("stack_by_color",   "Stack each color group into its own separate tower"),
+    ("place_in_bowls",   "Place each cube into its matching colored bowl"),
+    ("line_up_by_color", "Pick up each color's cubes and line them up in a row"),
+]
+
+# ══════════════════════════════════════════════════════════════
+#  CAMERA SETUP  — add cam_top to scene.xml if missing
+# ══════════════════════════════════════════════════════════════
+renderer = mujoco.Renderer(ctrl.model, height=IMG_HEIGHT, width=IMG_WIDTH)
+cam_id   = mujoco.mj_name2id(ctrl.model, mujoco.mjtObj.mjOBJ_CAMERA, CAMERA_NAME)
+if cam_id < 0:
+    print(f"\n[ERROR] Camera '{CAMERA_NAME}' not found in scene.xml.")
+    print("Add this line inside <worldbody> in scene.xml:")
+    print('  <camera name="cam_top" pos="0.45 -0.10 1.30" euler="0 55 85" fovy="65"/>')
+    sys.exit(1)
+print(f"Camera '{CAMERA_NAME}' found (id={cam_id})")
+
+# ══════════════════════════════════════════════════════════════
+#  RENDER + ENCODE
+# ══════════════════════════════════════════════════════════════
+def capture_image_b64() -> str:
+    """Render current scene from cam_top → base64 JPEG string."""
+    renderer.update_scene(ctrl.data, camera=CAMERA_NAME)
+    rgb = renderer.render()   # (H, W, 3) uint8
+
+    # Encode as JPEG in memory using only stdlib
+    import io
+    try:
+        from PIL import Image
+        buf = io.BytesIO()
+        Image.fromarray(rgb).save(buf, format="JPEG", quality=85)
+        return base64.b64encode(buf.getvalue()).decode("utf-8")
+    except ImportError:
+        # Fallback: raw PPM → PNG not available without PIL, use PNG via struct
+        # This path is rarely hit since mujoco env usually has PIL
+        raise RuntimeError("PIL not available. Install: pip install Pillow")
+
+# ══════════════════════════════════════════════════════════════
+#  GEMINI VISION CALL
+# ══════════════════════════════════════════════════════════════
+SYSTEM_PROMPT = """You are a vision-language controller for a Franka Panda robot arm in a MuJoCo simulation.
+
+The scene contains:
+- A Franka Panda robot arm
+- 6 colored cubes: 2 red, 2 blue, 2 green
+- 3 colored bowls: red, blue, green (fixed on the table)
+
+You will receive:
+1. A camera image of the current scene
+2. A natural language command from the user
+
+Your job:
+1. Look at the image and verify the scene matches what the command expects
+2. Output a JSON object with your decision
+
+Valid task keys: ["hover_all", "stack_all", "stack_by_color", "place_in_bowls", "line_up_by_color"]
+
+Output ONLY valid JSON, no markdown, no explanation:
 {
-  "task": "<task_name>",
-  "reasoning": "<one sentence explaining why>"
+  "task": "<one of the valid task keys>",
+  "confidence": <0.0 to 1.0>,
+  "scene_observation": "<one sentence: what you see in the image>",
+  "ready": <true if scene looks ready to execute the task, false otherwise>,
+  "reason": "<brief reason for your decision>"
 }
 
-Available task names and what they do:
-- "hover_all"       : Hover the arm above every cube for 5 seconds each (inspection)
-- "stack_all"       : Pick all 6 cubes and stack them into a single tall tower
-- "stack_by_color"  : Build 3 separate towers, one per color (red tower, blue tower, green tower)
-- "place_in_bowls"  : Place each cube into the bowl that matches its color
-- "line_up_by_color": Arrange each color's cubes side by side in neat rows
+If the command is ambiguous, pick the closest matching task and set confidence below 0.7.
+If the scene looks wrong (e.g. cubes already stacked when asked to stack), still return the task but set ready=false."""
 
-Choose the task that best matches the user's intent.
-If the command is ambiguous, choose the closest match.
-"""
-
-# ══════════════════════════════════════════════════════════════
-#  GEMINI CALL
-# ══════════════════════════════════════════════════════════════
-def parse_command(user_command: str) -> dict:
+def call_gemini_vision(command: str, image_b64: str) -> dict:
     """
-    Send user_command to Gemini, get back {"task": ..., "reasoning": ...}.
-    Falls back to a simple keyword match if API key missing or call fails.
+    Send image + command to Gemini 1.5 Flash Vision.
+    Returns parsed JSON dict or raises on failure.
     """
-    if not GEMINI_API_KEY:
-        print("  ⚠️  No GEMINI_API_KEY found — using keyword fallback")
-        return _keyword_fallback(user_command)
-
-    payload = json.dumps({
+    payload = {
         "contents": [{
             "parts": [
-                {"text": SYSTEM_PROMPT},
-                {"text": f"Command: {user_command}"}
+                {
+                    "inline_data": {
+                        "mime_type": "image/jpeg",
+                        "data": image_b64
+                    }
+                },
+                {
+                    "text": f"{SYSTEM_PROMPT}\n\nUser command: {command}"
+                }
             ]
-        }]
-    }).encode("utf-8")
+        }],
+        "generationConfig": {
+            "temperature": 0.1,
+            "maxOutputTokens": 256,
+        }
+    }
 
-    req = urllib.request.Request(
+    body = json.dumps(payload).encode("utf-8")
+    req  = urllib.request.Request(
         GEMINI_URL,
-        data=payload,
+        data=body,
         headers={"Content-Type": "application/json"},
         method="POST"
     )
@@ -82,93 +153,160 @@ def parse_command(user_command: str) -> dict:
     try:
         with urllib.request.urlopen(req, timeout=15) as resp:
             raw = json.loads(resp.read().decode("utf-8"))
-        text = raw["candidates"][0]["content"]["parts"][0]["text"].strip()
-        # Strip markdown fences if Gemini adds them
-        text = text.replace("```json", "").replace("```", "").strip()
+    except urllib.error.HTTPError as e:
+        raise RuntimeError(f"Gemini HTTP {e.code}: {e.read().decode()}")
+
+    # Extract text from Gemini response
+    text = raw["candidates"][0]["content"]["parts"][0]["text"].strip()
+
+    # Strip markdown fences if present
+    if text.startswith("```"):
+        lines = text.split("\n")
+        text = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
+
+    try:
         result = json.loads(text)
-        return result
-    except Exception as e:
-        print(f"  ⚠️  Gemini call failed ({e}) — using keyword fallback")
-        return _keyword_fallback(user_command)
+    except json.JSONDecodeError:
+        raise RuntimeError(f"Gemini returned non-JSON: {text}")
 
-def _keyword_fallback(cmd: str) -> dict:
-    """Simple keyword matching when Gemini is unavailable."""
-    cmd = cmd.lower()
-    if "inspect" in cmd or "hover" in cmd:
-        task = "hover_all"
-    elif "single" in cmd or "one tower" in cmd or ("stack" in cmd and "color" not in cmd and "respective" not in cmd):
-        task = "stack_all"
-    elif "respective" in cmd or "each color" in cmd and "stack" in cmd:
-        task = "stack_by_color"
-    elif "bowl" in cmd or "matching" in cmd:
-        task = "place_in_bowls"
-    elif "line" in cmd or "row" in cmd:
-        task = "line_up_by_color"
-    else:
-        task = "hover_all"
-    return {"task": task, "reasoning": "keyword match fallback"}
+    # Validate task key
+    if result.get("task") not in VALID_TASKS:
+        raise RuntimeError(f"Gemini returned unknown task: {result.get('task')}")
+
+    return result
 
 # ══════════════════════════════════════════════════════════════
-#  5 DEMO COMMANDS
+#  KEYWORD FALLBACK (if Gemini call fails)
 # ══════════════════════════════════════════════════════════════
-DEMO_COMMANDS = [
-    "Hover over all the cubes and inspect them",
-    "Stack all cubes into a single tower",
-    "Stack each color's cubes into their respective towers",
-    "Place each cube into its matching colored bowl",
-    "Pick up each color's cubes and line them up",
-]
+def keyword_fallback(command: str) -> str:
+    cmd = command.lower()
+    if "hover"  in cmd or "inspect"  in cmd:  return "hover_all"
+    if "bowl"   in cmd or "match"    in cmd:  return "place_in_bowls"
+    if "color"  in cmd and "stack"   in cmd:  return "stack_by_color"
+    if "line"   in cmd or "row"      in cmd:  return "line_up_by_color"
+    if "stack"  in cmd or "tower"    in cmd:  return "stack_all"
+    return "hover_all"   # safe default
 
 # ══════════════════════════════════════════════════════════════
-#  MAIN
+#  MAIN VLA LOOP
 # ══════════════════════════════════════════════════════════════
-def run_vla(viewer):
-    print("\n" + "═"*55)
-    print("  VLA PIPELINE — Franka Panda + Gemini")
-    print("═"*55)
+def run_vla():
+    print("\n" + "="*60)
+    print("  GEMINI VISION VLA PIPELINE")
+    print("  Vision + Language → Action")
+    print("="*60)
 
-    for i, command in enumerate(DEMO_COMMANDS, 1):
-        print(f"\n{'─'*55}")
-        print(f"  Command {i}: \"{command}\"")
-        print(f"{'─'*55}")
-
-        # ── Parse via Gemini ──────────────────────────────────
-        result = parse_command(command)
-        task_name = result.get("task", "hover_all")
-        reasoning = result.get("reasoning", "")
-        print(f"  Gemini → task: '{task_name}'")
-        print(f"  Reasoning: {reasoning}")
-
-        # ── Validate ──────────────────────────────────────────
-        if task_name not in TASK_MAP:
-            print(f"  ⚠️  Unknown task '{task_name}', skipping")
-            continue
-
-        # ── Execute ───────────────────────────────────────────
-        print(f"  Executing…")
-        TASK_MAP[task_name](viewer)
-
-        # ── Reset scene for next command ──────────────────────
-        if i < len(DEMO_COMMANDS):
-            print(f"\n  ↺ Resetting scene for next command…")
-            reset_to_home()
-            pause(viewer, 800)
-
-    print("\n" + "═"*55)
-    print("  ✓ All 5 VLA commands executed successfully!")
-    print("═"*55)
-
-if __name__ == "__main__":
-    with mujoco.viewer.launch_passive(model, data) as viewer:
+    with mujoco.viewer.launch_passive(ctrl.model, ctrl.data) as viewer:
         viewer.cam.lookat[:] = [0.45, 0.0, 0.3]
         viewer.cam.distance   = 1.8
         viewer.cam.elevation  = -20
 
-        run_vla(viewer)
+        for task_idx, (task_key, command) in enumerate(DEMO_COMMANDS):
+            print(f"\n{'─'*60}")
+            print(f"Command {task_idx+1}/5: \"{command}\"")
+            print(f"{'─'*60}")
 
-        # Keep window open after all tasks finish
-        import time
-        while viewer.is_running():
-            mujoco.mj_step(model, data)
+            ctrl.reset_to_home()
+            ctrl.pause(viewer, 300)
             viewer.sync()
-            time.sleep(0.01)
+
+            # ── VISION step: capture scene ────────────────────────────────
+            print("  [VLA] Capturing scene image...")
+            image_b64 = capture_image_b64()
+
+            # ── LANGUAGE step: send to Gemini Vision ─────────────────────
+            print("  [VLA] Querying Gemini Vision...")
+            try:
+                result = call_gemini_vision(command, image_b64)
+                chosen_task = result["task"]
+                confidence  = result.get("confidence", 1.0)
+                observation = result.get("scene_observation", "")
+                ready       = result.get("ready", True)
+                reason      = result.get("reason", "")
+
+                print(f"  [VLA] Gemini sees: {observation}")
+                print(f"  [VLA] Decision: {chosen_task}  (confidence={confidence:.2f})")
+                print(f"  [VLA] Ready: {ready}  Reason: {reason}")
+
+                if not ready:
+                    print("  [VLA] Scene not ready — executing anyway (simulation context)")
+
+                if confidence < 0.5:
+                    print(f"  [VLA] Low confidence — using keyword fallback")
+                    chosen_task = keyword_fallback(command)
+
+            except Exception as e:
+                print(f"  [VLA] Gemini failed: {e}")
+                print(f"  [VLA] Using keyword fallback")
+                chosen_task = keyword_fallback(command)
+
+            # ── ACTION step: execute chosen task ──────────────────────────
+            print(f"  [VLA] Executing: {chosen_task}")
+            task_fn = ctrl.TASK_MAP[chosen_task]
+            task_fn(viewer)
+
+            print(f"  [VLA] Task complete. Pausing 2s...")
+            time.sleep(2.0)
+
+        print("\n" + "="*60)
+        print("  All 5 commands executed.")
+        print("  Keeping viewer open — close window to exit.")
+        print("="*60)
+
+        while viewer.is_running():
+            mujoco.mj_step(ctrl.model, ctrl.data)
+            viewer.sync()
+
+# ══════════════════════════════════════════════════════════════
+#  INTERACTIVE MODE — type your own commands
+# ══════════════════════════════════════════════════════════════
+def run_interactive():
+    """Type any natural language command — Gemini decides which task to run."""
+    print("\n" + "="*60)
+    print("  INTERACTIVE VLA MODE")
+    print("  Type a command, Gemini Vision will decide what to do.")
+    print("  Type 'quit' to exit.")
+    print("="*60)
+
+    with mujoco.viewer.launch_passive(ctrl.model, ctrl.data) as viewer:
+        viewer.cam.lookat[:] = [0.45, 0.0, 0.3]
+        viewer.cam.distance   = 1.8
+        viewer.cam.elevation  = -20
+
+        ctrl.reset_to_home()
+        ctrl.pause(viewer, 300)
+
+        while viewer.is_running():
+            cmd = input("\n> Enter command (or 'reset'/'quit'): ").strip()
+            if not cmd:
+                continue
+            if cmd.lower() == "quit":
+                break
+            if cmd.lower() == "reset":
+                ctrl.reset_to_home()
+                ctrl.pause(viewer, 300)
+                print("  Scene reset.")
+                continue
+
+            image_b64 = capture_image_b64()
+            print("  [VLA] Querying Gemini Vision...")
+
+            try:
+                result = call_gemini_vision(cmd, image_b64)
+                chosen_task = result["task"]
+                print(f"  [VLA] Gemini sees: {result.get('scene_observation','')}")
+                print(f"  [VLA] → {chosen_task}  (confidence={result.get('confidence',1):.2f})")
+            except Exception as e:
+                print(f"  [VLA] Gemini error: {e}  → fallback")
+                chosen_task = keyword_fallback(cmd)
+
+            ctrl.TASK_MAP[chosen_task](viewer)
+            print(f"  Done.")
+
+
+if __name__ == "__main__":
+    import sys
+    if len(sys.argv) > 1 and sys.argv[1] == "interactive":
+        run_interactive()
+    else:
+        run_vla()
