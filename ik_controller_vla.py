@@ -150,6 +150,14 @@ def above(body_id, extra_z=0.0):
     p[2] += FINGER_OFFSET + extra_z
     return p
 
+def bowl_drop_z(bowl_id):
+    """
+    Bowl interior bottom is above bowl body center by a small offset.
+    Tuned for the larger hemispherical bowls.
+    """
+    BOWL_INTERIOR_OFFSET = 0.09
+    return data.xpos[bowl_id][2] + BOWL_INTERIOR_OFFSET
+
 def move_to(target_pos, viewer, max_steps=30000, step_limit=MAX_DCTRL):
     pos_err = ori_err = 999.0
     for i in range(max_steps):
@@ -427,7 +435,7 @@ def pick_and_place_to(cube_id, place_xyz, viewer):
     move_to(approach, viewer)
 
     drop = place_xyz.copy()
-    drop[2] = place_xyz[2] + FINGER_OFFSET + 0.01
+    drop[2] = place_xyz[2] + FINGER_OFFSET + 0.005
     move_to(drop, viewer)
 
     # ── 6. Release ────────────────────────────────────────────────────────────
@@ -481,9 +489,11 @@ def stack_by_color(viewer):
 def place_in_bowls(viewer):
     print("\n-- TASK 4: Place each cube in its matching bowl --")
     for color, cube_ids in CUBES.items():
-        bowl_xy = body_pos(BOWLS[color])[:2]
+        bowl_id = BOWLS[color]
+        bowl_xy = body_pos(bowl_id)[:2]
+        bowl_z = bowl_drop_z(bowl_id)
         for layer, cube_id in enumerate(cube_ids):
-            z = STACK_BASE_Z + layer * CUBE_HEIGHT
+            z = bowl_z + layer * CUBE_HEIGHT
             pick_and_place_to(cube_id, [bowl_xy[0], bowl_xy[1], z], viewer)
     print("  OK")
 
