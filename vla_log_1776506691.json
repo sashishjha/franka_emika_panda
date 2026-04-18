@@ -1,0 +1,7 @@
+[
+  {
+    "task_name": "line_up_by_color",
+    "scene_observation": "The scene shows six colored cubes (two red, two blue, two green) scattered on a blue checkered table, with three colored bowls (red, blue, green) arranged in an arc below them. A robot gripper is visible above the cubes.",
+    "reasoning": "The user command explicitly requests to 'line up by color', which directly corresponds to the 'line_up_by_color' task."
+  }
+]

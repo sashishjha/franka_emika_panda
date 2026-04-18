@@ -56,8 +56,9 @@ def query_gemini(command, rgb):
                     p = p.strip().lstrip("json").strip()
                     if p.startswith("{"): raw = p; break
             try:    result = json.loads(raw)
-            except: result = {"task_name": _keyword_fallback(command),
-                              "scene_observation": "(parse failed)", "reasoning": "fallback"}
+            except:
+                # result = {"task_name": _keyword_fallback(command),"scene_observation": "(parse failed)", "reasoning": "fallback"}
+                pass
             if result.get("task_name") not in ctrl.TASK_MAP:
                 result["task_name"] = _keyword_fallback(command)
             return result

@@ -218,22 +218,24 @@ if __name__ == "__main__":
     print_detections(result)
 
     print("  ── Ground truth vs vision XY error ─────────────────────")
-    names = {"red":["red_cube_1","red_cube_2"],
-             "blue":["blue_cube_1","blue_cube_2"],
-             "green":["green_cube_1","green_cube_2"]}
-    for color, bnames in names.items():
-        for i, bname in enumerate(bnames):
+    from scipy.spatial.distance import cdist    
+    for color in ("red", "blue", "green"):
+        gt_positions = []
+        for bname in [f"{color}_cube_1", f"{color}_cube_2"]:
             bid = mujoco.mj_name2id(ctrl.model, mujoco.mjtObj.mjOBJ_BODY, bname)
-            gt  = ctrl.data.xpos[bid]
-            vp  = result["cubes"][color][i]
-            if vp is not None:
-                err = np.linalg.norm(gt[:2] - vp[:2]) * 100
-                print(f"  {bname:<16} gt=[{gt[0]:.3f},{gt[1]:.3f}]  "
-                      f"vis=[{vp[0]:.3f},{vp[1]:.3f}]  err={err:.1f}cm")
-            else:
-                print(f"  {bname:<16} MISSED")
-
-    if "_debug_img" in result:
-        cv2.imwrite("vision_debug.jpg",
-                    cv2.cvtColor(result["_debug_img"], cv2.COLOR_RGB2BGR))
-        print("\n  Debug image → vision_debug.jpg")
+            gt_positions.append(ctrl.data.xpos[bid][:2].copy()) 
+        vis_positions = [vp[:2] for vp in result["cubes"][color] if vp is not None] 
+        if len(vis_positions) == 0:
+            print(f"  {color}: NO DETECTIONS")
+            continue    
+        gt_arr  = np.array(gt_positions)   # shape (2,2)
+        vis_arr = np.array(vis_positions)  # shape (N,2)    
+        D = cdist(vis_arr, gt_arr)  # (N,2) distance matrix
+        for vi in range(len(vis_arr)):
+            gi  = np.argmin(D[vi])
+            err = D[vi][gi] * 100
+            print(f"  {color}_cube_{vi+1}  "
+                  f"vis=[{vis_arr[vi][0]:.3f},{vis_arr[vi][1]:.3f}]  "
+                  f"best_gt=[{gt_arr[gi][0]:.3f},{gt_arr[gi][1]:.3f}]  "
+                  f"err={err:.1f}cm")
+    print("  ────────────────────────────────────────────────────────") 
