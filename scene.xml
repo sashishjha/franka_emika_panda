@@ -16,9 +16,7 @@
   <visual>
     <headlight diffuse="0.6 0.6 0.6" ambient="0.3 0.3 0.3" specular="0 0 0"/>
     <rgba haze="0.15 0.25 0.35 1"/>
-    <global azimuth="120" elevation="-20"
-            offwidth="512"
-            offheight="512"/>
+    <global azimuth="120" elevation="-20" offwidth="512" offheight="512"/>
   </visual>
 
   <asset>
@@ -33,12 +31,11 @@
   </asset>
 
   <worldbody>
-    <camera name="cam_top" pos="0.45 -0.10 1.30" euler="0 55 85" fovy="65"/>
+    <camera name="cam_top" pos="0.45 0.0 1.0" euler="0 0 0" fovy="90"/>
     <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
     <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
 
-    <!-- ── Cubes: 2 per color, spread on table ── -->
-    <!-- Red cubes -->
+    <!-- Cubes: 2 per color -->
     <body name="red_cube_1" pos="0.60  0.10 0.03">
       <freejoint/>
       <geom type="box" size="0.03 0.03 0.03" rgba="1 0 0 1" mass="0.1"/>
@@ -48,7 +45,6 @@
       <geom type="box" size="0.03 0.03 0.03" rgba="1 0 0 1" mass="0.1"/>
     </body>
 
-    <!-- Blue cubes -->
     <body name="blue_cube_1" pos="0.45  0.20 0.03">
       <freejoint/>
       <geom type="box" size="0.03 0.03 0.03" rgba="0 0 1 1" mass="0.1"/>
@@ -58,7 +54,6 @@
       <geom type="box" size="0.03 0.03 0.03" rgba="0 0 1 1" mass="0.1"/>
     </body>
 
-    <!-- Green cubes -->
     <body name="green_cube_1" pos="0.30  0.15 0.03">
       <freejoint/>
       <geom type="box" size="0.03 0.03 0.03" rgba="0 1 0 1" mass="0.1"/>
@@ -68,69 +63,71 @@
       <geom type="box" size="0.03 0.03 0.03" rgba="0 1 0 1" mass="0.1"/>
     </body>
 
+    <!-- Green bowl -->
+    <body name="green_bowl" pos="0.22 -0.35 0.00">
+      <geom type="cylinder" size="0.0550 0.0080" pos="0 0 0.0080" rgba="0.08 0.70 0.08 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="0.0643 0.0000 0.0359" euler="0 25 0.00" rgba="0.12 0.85 0.12 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="0.0594 0.0246 0.0359" euler="0 25 22.50" rgba="0.12 0.85 0.12 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="0.0455 0.0455 0.0359" euler="0 25 45.00" rgba="0.12 0.85 0.12 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="0.0246 0.0594 0.0359" euler="0 25 67.50" rgba="0.12 0.85 0.12 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="0.0000 0.0643 0.0359" euler="0 25 90.00" rgba="0.12 0.85 0.12 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="-0.0246 0.0594 0.0359" euler="0 25 112.50" rgba="0.12 0.85 0.12 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="-0.0455 0.0455 0.0359" euler="0 25 135.00" rgba="0.12 0.85 0.12 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="-0.0594 0.0246 0.0359" euler="0 25 157.50" rgba="0.12 0.85 0.12 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="-0.0643 0.0000 0.0359" euler="0 25 180.00" rgba="0.12 0.85 0.12 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="-0.0594 -0.0246 0.0359" euler="0 25 202.50" rgba="0.12 0.85 0.12 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="-0.0455 -0.0455 0.0359" euler="0 25 225.00" rgba="0.12 0.85 0.12 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="-0.0246 -0.0594 0.0359" euler="0 25 247.50" rgba="0.12 0.85 0.12 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="-0.0000 -0.0643 0.0359" euler="0 25 270.00" rgba="0.12 0.85 0.12 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="0.0246 -0.0594 0.0359" euler="0 25 292.50" rgba="0.12 0.85 0.12 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="0.0455 -0.0455 0.0359" euler="0 25 315.00" rgba="0.12 0.85 0.12 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="0.0594 -0.0246 0.0359" euler="0 25 337.50" rgba="0.12 0.85 0.12 1" mass="0"/>
+      <geom type="cylinder" size="0.0821 0.004" pos="0 0 0.0559" rgba="0.12 0.85 0.12 1" mass="0" contype="0" conaffinity="0"/>
+    </body>
+
+    <!-- Blue bowl -->
+    <body name="blue_bowl" pos="0.45 -0.55 0.00">
+      <geom type="cylinder" size="0.0550 0.0080" pos="0 0 0.0080" rgba="0.08 0.08 0.75 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="0.0643 0.0000 0.0359" euler="0 25 0.00" rgba="0.15 0.15 0.92 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="0.0594 0.0246 0.0359" euler="0 25 22.50" rgba="0.15 0.15 0.92 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="0.0455 0.0455 0.0359" euler="0 25 45.00" rgba="0.15 0.15 0.92 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="0.0246 0.0594 0.0359" euler="0 25 67.50" rgba="0.15 0.15 0.92 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="0.0000 0.0643 0.0359" euler="0 25 90.00" rgba="0.15 0.15 0.92 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="-0.0246 0.0594 0.0359" euler="0 25 112.50" rgba="0.15 0.15 0.92 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="-0.0455 0.0455 0.0359" euler="0 25 135.00" rgba="0.15 0.15 0.92 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="-0.0594 0.0246 0.0359" euler="0 25 157.50" rgba="0.15 0.15 0.92 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="-0.0643 0.0000 0.0359" euler="0 25 180.00" rgba="0.15 0.15 0.92 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="-0.0594 -0.0246 0.0359" euler="0 25 202.50" rgba="0.15 0.15 0.92 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="-0.0455 -0.0455 0.0359" euler="0 25 225.00" rgba="0.15 0.15 0.92 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="-0.0246 -0.0594 0.0359" euler="0 25 247.50" rgba="0.15 0.15 0.92 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="-0.0000 -0.0643 0.0359" euler="0 25 270.00" rgba="0.15 0.15 0.92 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="0.0246 -0.0594 0.0359" euler="0 25 292.50" rgba="0.15 0.15 0.92 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="0.0455 -0.0455 0.0359" euler="0 25 315.00" rgba="0.15 0.15 0.92 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="0.0594 -0.0246 0.0359" euler="0 25 337.50" rgba="0.15 0.15 0.92 1" mass="0"/>
+      <geom type="cylinder" size="0.0821 0.004" pos="0 0 0.0559" rgba="0.15 0.15 0.92 1" mass="0" contype="0" conaffinity="0"/>
+    </body>
+
     <!-- Red bowl -->
-<body name="red_bowl" pos="0.68 -0.35 -0.045">
-    <!-- outer shell -->
-    <geom type="sphere"
-          size="0.10"
-          rgba="0.85 0.15 0.15 1"
-          mass="0"/>
-
-    <!-- hollow interior -->
-    <geom type="sphere"
-          size="0.085"
-          pos="0 0 0.01"
-          rgba="0.95 0.95 0.95 1"
-          mass="0"/>
-
-    <!-- rim highlight -->
-    <geom type="cylinder"
-          size="0.10 0.004"
-          pos="0 0 0.055"
-          rgba="0.9 0.2 0.2 1"
-          mass="0"/>
-</body>
-
-<!-- Blue bowl -->
-<body name="blue_bowl" pos="0.45 -0.40 -0.045">
-    <geom type="sphere"
-          size="0.10"
-          rgba="0.15 0.15 0.85 1"
-          mass="0"/>
-
-    <geom type="sphere"
-          size="0.085"
-          pos="0 0 0.01"
-          rgba="0.95 0.95 0.95 1"
-          mass="0"/>
-
-    <geom type="cylinder"
-          size="0.10 0.004"
-          pos="0 0 0.055"
-          rgba="0.2 0.2 0.9 1"
-          mass="0"/>
-</body>
-
-<!-- Green bowl -->
-<body name="green_bowl" pos="0.22 -0.35 -0.045">
-    <geom type="sphere"
-          size="0.10"
-          rgba="0.15 0.75 0.15 1"
-          mass="0"/>
-
-    <geom type="sphere"
-          size="0.085"
-          pos="0 0 0.01"
-          rgba="0.95 0.95 0.95 1"
-          mass="0"/>
-
-    <geom type="cylinder"
-          size="0.10 0.004"
-          pos="0 0 0.055"
-          rgba="0.2 0.85 0.2 1"
-          mass="0"/>
-</body>
+    <body name="red_bowl" pos="0.68 -0.35 0.00">
+      <geom type="cylinder" size="0.0550 0.0080" pos="0 0 0.0080" rgba="0.75 0.06 0.06 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="0.0643 0.0000 0.0359" euler="0 25 0.00" rgba="0.92 0.12 0.12 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="0.0594 0.0246 0.0359" euler="0 25 22.50" rgba="0.92 0.12 0.12 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="0.0455 0.0455 0.0359" euler="0 25 45.00" rgba="0.92 0.12 0.12 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="0.0246 0.0594 0.0359" euler="0 25 67.50" rgba="0.92 0.12 0.12 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="0.0000 0.0643 0.0359" euler="0 25 90.00" rgba="0.92 0.12 0.12 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="-0.0246 0.0594 0.0359" euler="0 25 112.50" rgba="0.92 0.12 0.12 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="-0.0455 0.0455 0.0359" euler="0 25 135.00" rgba="0.92 0.12 0.12 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="-0.0594 0.0246 0.0359" euler="0 25 157.50" rgba="0.92 0.12 0.12 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="-0.0643 0.0000 0.0359" euler="0 25 180.00" rgba="0.92 0.12 0.12 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="-0.0594 -0.0246 0.0359" euler="0 25 202.50" rgba="0.92 0.12 0.12 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="-0.0455 -0.0455 0.0359" euler="0 25 225.00" rgba="0.92 0.12 0.12 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="-0.0246 -0.0594 0.0359" euler="0 25 247.50" rgba="0.92 0.12 0.12 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="-0.0000 -0.0643 0.0359" euler="0 25 270.00" rgba="0.92 0.12 0.12 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="0.0246 -0.0594 0.0359" euler="0 25 292.50" rgba="0.92 0.12 0.12 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="0.0455 -0.0455 0.0359" euler="0 25 315.00" rgba="0.92 0.12 0.12 1" mass="0"/>
+      <geom type="box" size="0.0085 0.0126 0.0220" pos="0.0594 -0.0246 0.0359" euler="0 25 337.50" rgba="0.92 0.12 0.12 1" mass="0"/>
+      <geom type="cylinder" size="0.0821 0.004" pos="0 0 0.0559" rgba="0.92 0.12 0.12 1" mass="0" contype="0" conaffinity="0"/>
+    </body>
 
   </worldbody>
-
 </mujoco>

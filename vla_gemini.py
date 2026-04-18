@@ -263,7 +263,8 @@ def run_interactive(viewer):
     """
     print(f"\n{'─'*62}")
     print("  INTERACTIVE VLA MODE")
-    print("  Commands: type anything, or 'demo' to run all 5, or 'quit'")
+    print("  Commands: type anything, or 'demo' to run all 5, or 'stop', 'reset', 'quit'")
+    print("  IMPORTANT: Enter 'stop' at this '>' prompt, not in the zsh terminal.")
     print(f"{'─'*62}\n")
 
     while viewer.is_running():
@@ -277,14 +278,21 @@ def run_interactive(viewer):
             continue
         if cmd.lower() in ("quit", "exit", "q"):
             break
+        if cmd.lower() == "stop":
+            ctrl.STOP_REQUESTED = True
+            print("  Stop requested. Current task will halt at the next loop checkpoint.")
+            continue
         if cmd.lower() == "demo":
+            ctrl.STOP_REQUESTED = False
             run_demo(viewer)
         elif cmd.lower() == "reset":
+            ctrl.STOP_REQUESTED = False
             ctrl.reset_to_home()
             mujoco.mj_forward(ctrl.model, ctrl.data)
             viewer.sync()
             print("  Reset to home.")
         else:
+            ctrl.STOP_REQUESTED = False
             run_command(cmd, viewer)
 
 

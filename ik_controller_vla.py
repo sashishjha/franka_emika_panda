@@ -41,6 +41,8 @@ GRIPPER_OPEN        = 255
 GRIPPER_CLOSE_FIRM  = 10
 GRIPPER_STEP        = 3
 
+STOP_REQUESTED = False
+
 DESIRED_ZAXIS = np.array([0.0, 0.0, -1.0])
 JOINT_LOW  = np.array([-2.8973, -1.7628, -2.8973, -3.0718, -2.8973, -0.0175, -2.8973])
 JOINT_HIGH = np.array([ 2.8973,  1.7628,  2.8973, -0.0698,  2.8973,  3.7525,  2.8973])
@@ -155,7 +157,7 @@ def bowl_drop_z(bowl_id):
     Bowl interior bottom is above bowl body center by a small offset.
     Tuned for the larger hemispherical bowls.
     """
-    BOWL_INTERIOR_OFFSET = 0.09
+    BOWL_INTERIOR_OFFSET = 0.03
     return data.xpos[bowl_id][2] + BOWL_INTERIOR_OFFSET
 
 def move_to(target_pos, viewer, max_steps=30000, step_limit=MAX_DCTRL):
@@ -454,6 +456,9 @@ def pick_and_place_to(cube_id, place_xyz, viewer):
 def hover_all(viewer):
     print("\n-- TASK 1: Hover and inspect all cubes --")
     for cube_id in ALL_CUBES:
+        if STOP_REQUESTED:
+            print("[STOP] Task interrupted.")
+            return
         cname = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, cube_id)
         print(f"  Hovering: {cname}")
         move_to(above(cube_id, HOVER_HEIGHT), viewer)
@@ -466,6 +471,9 @@ STACK_ALL_XY = np.array([0.50, 0.0])
 def stack_all(viewer):
     print("\n-- TASK 2: Stack ALL cubes into one tower --")
     for layer, cube_id in enumerate(ALL_CUBES):
+        if STOP_REQUESTED:
+            print("[STOP] Task interrupted.")
+            return
         z = STACK_BASE_Z + layer * CUBE_HEIGHT
         pick_and_place_to(cube_id, [STACK_ALL_XY[0], STACK_ALL_XY[1], z], viewer)
     print("  OK")
@@ -479,8 +487,14 @@ COLOR_TOWER_XY = {
 def stack_by_color(viewer):
     print("\n-- TASK 3: Stack each color into its own tower --")
     for color, cube_ids in CUBES.items():
+        if STOP_REQUESTED:
+            print("[STOP] Task interrupted.")
+            return
         print(f"  Building {color} tower...")
         for layer, cube_id in enumerate(cube_ids):
+            if STOP_REQUESTED:
+                print("[STOP] Task interrupted.")
+                return
             z  = STACK_BASE_Z + layer * CUBE_HEIGHT
             xy = COLOR_TOWER_XY[color]
             pick_and_place_to(cube_id, [xy[0], xy[1], z], viewer)
@@ -489,10 +503,16 @@ def stack_by_color(viewer):
 def place_in_bowls(viewer):
     print("\n-- TASK 4: Place each cube in its matching bowl --")
     for color, cube_ids in CUBES.items():
+        if STOP_REQUESTED:
+            print("[STOP] Task interrupted.")
+            return
         bowl_id = BOWLS[color]
         bowl_xy = body_pos(bowl_id)[:2]
         bowl_z = bowl_drop_z(bowl_id)
         for layer, cube_id in enumerate(cube_ids):
+            if STOP_REQUESTED:
+                print("[STOP] Task interrupted.")
+                return
             z = bowl_z + layer * CUBE_HEIGHT
             pick_and_place_to(cube_id, [bowl_xy[0], bowl_xy[1], z], viewer)
     print("  OK")
@@ -504,8 +524,14 @@ COLOR_LINE_Y = {"red": 0.30, "blue": 0.15, "green": 0.00}
 def line_up_by_color(viewer):
     print("\n-- TASK 5: Line up each color's cubes --")
     for color, cube_ids in CUBES.items():
+        if STOP_REQUESTED:
+            print("[STOP] Task interrupted.")
+            return
         y0 = COLOR_LINE_Y[color]
         for i, cube_id in enumerate(cube_ids):
+            if STOP_REQUESTED:
+                print("[STOP] Task interrupted.")
+                return
             pick_and_place_to(cube_id, [LINE_X, y0 + i * LINE_GAP, STACK_BASE_Z], viewer)
     print("  OK")
 
