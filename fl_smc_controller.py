@@ -90,14 +90,18 @@ def vla_choose_trajectory(prompt, max_retries=3):
 # ══════════════════════════════════════════════════════════════════════════════
 HOME    = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785])
 TAU_MAX = np.array([87, 87, 87, 87, 12, 12, 12], dtype=float)
+EE_OFFSET = np.array([0.0, 0.0, 0.1034])  # Z-offset from hand to fingertips
 
-def get_jacobian(model, data, hand_id):
+def get_ee_position(data, hand_id):
+    return data.xpos[hand_id] + data.xmat[hand_id].reshape(3,3) @ EE_OFFSET
+
+def get_jacobian(model, data, hand_id, point):
     jacp = np.zeros((3, model.nv))
-    mujoco.mj_jacBody(model, data, jacp, None, hand_id)
+    mujoco.mj_jac(model, data, jacp, None, point, hand_id)
     return jacp[:, :7]
 
-def _fl_core(model, data, hand_id, a_x, J_prev, dt):
-    J = get_jacobian(model, data, hand_id)
+def _fl_core(model, data, hand_id, a_x, J_prev, dt, point):
+    J = get_jacobian(model, data, hand_id, point)
     M = np.zeros((model.nv, model.nv))
     mujoco.mj_fullM(model, M, data.qM)
     h = data.qfrc_bias[:7].copy()
@@ -109,20 +113,20 @@ def _fl_core(model, data, hand_id, a_x, J_prev, dt):
     return np.clip(tau, -TAU_MAX, TAU_MAX), J
 
 def fl_pd(model, data, hand_id, Xd, Xd_d, Xd_dd, J_prev, dt):
-    X = data.xpos[hand_id].copy()
-    J = get_jacobian(model, data, hand_id)
+    X = get_ee_position(data, hand_id)
+    J = get_jacobian(model, data, hand_id, X)
     e = Xd - X; ed = Xd_d - J@data.qvel[:7]
     a_x = Xd_dd + 40.0*ed + 400.0*e
-    tau, Jo = _fl_core(model, data, hand_id, a_x, J_prev, dt)
+    tau, Jo = _fl_core(model, data, hand_id, a_x, J_prev, dt, X)
     return tau, Jo, np.linalg.norm(e)
 
 def fl_smc(model, data, hand_id, Xd, Xd_d, Xd_dd, J_prev, dt):
-    X = data.xpos[hand_id].copy()
-    J = get_jacobian(model, data, hand_id)
+    X = get_ee_position(data, hand_id)
+    J = get_jacobian(model, data, hand_id, X)
     e = Xd - X; ed = Xd_d - J@data.qvel[:7]
     s = ed + 10.0*e
     a_x = Xd_dd + 10.0*ed + 15.0*np.clip(s/0.02, -1, 1) + 5.0*s
-    tau, Jo = _fl_core(model, data, hand_id, a_x, J_prev, dt)
+    tau, Jo = _fl_core(model, data, hand_id, a_x, J_prev, dt, X)
     return tau, Jo, np.linalg.norm(e)
 
 CTRL_MAP = {"PD": fl_pd, "SMC": fl_smc}
@@ -153,20 +157,20 @@ def reset_robot(model, data):
         mujoco.mj_step(model, data)
 
 def draw_path(model, center, traj_func, T_total):
-    for i in range(200):
+    for i in range(1000):
         sid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, f"path_{i}")
         if sid >= 0:
-            Xd, _, _ = traj_func(i*T_total/200.0, center)
+            Xd, _, _ = traj_func(i*T_total/1000.0, center)
             model.site_pos[sid] = Xd
 
 def hide_trail(model):
-    for i in range(300):
+    for i in range(1000):
         sid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, f"trail_{i}")
         if sid >= 0:
             model.site_pos[sid] = [0, 0, -10]
 
-def run_sim(ctrl_type, traj_name, T_total=8.0, use_viewer=False, disturbance=0.0):
-    """Run simulation. disturbance: amplitude of sinusoidal torque disturbance (Nm)."""
+def run_sim(ctrl_type, traj_name, T_total=8.0, use_viewer=False, dist_vector=None, dist_is_continuous=False):
+    """Run simulation. dist_vector: 7-element array. dist_is_continuous: True for constant torque, False for sinusoidal."""
     model = mujoco.MjModel.from_xml_path(SCENE_XML)
     data  = mujoco.MjData(model)
     dt    = model.opt.timestep
@@ -178,7 +182,7 @@ def run_sim(ctrl_type, traj_name, T_total=8.0, use_viewer=False, disturbance=0.0
         make_arm_transparent(model, alpha=0.20)
 
     reset_robot(model, data)
-    center = data.xpos[hand_id].copy()
+    center = get_ee_position(data, hand_id).copy()
     traj_func = TRAJ_MAP[traj_name]
     draw_path(model, center, traj_func, T_total)
     hide_trail(model)
@@ -191,7 +195,7 @@ def run_sim(ctrl_type, traj_name, T_total=8.0, use_viewer=False, disturbance=0.0
         viewer.cam.lookat[:] = center
         viewer.cam.distance, viewer.cam.elevation = 0.8, -25
 
-    J_prev = get_jacobian(model, data, hand_id)
+    J_prev = get_jacobian(model, data, hand_id, get_ee_position(data, hand_id))
     N = int(T_total / dt)
     log_t, log_e = [], []
     trail_idx = 0
@@ -205,20 +209,22 @@ def run_sim(ctrl_type, traj_name, T_total=8.0, use_viewer=False, disturbance=0.0
         if ref_id >= 0:
             model.site_pos[ref_id] = Xd
         if ee_id >= 0:
-            model.site_pos[ee_id] = data.xpos[hand_id].copy()
+            model.site_pos[ee_id] = get_ee_position(data, hand_id)
 
-        # Drop a trail point every 100 steps
-        if use_viewer and i % 100 == 0 and trail_idx < 300:
+        # Drop a trail point more frequently to form a continuous line
+        if use_viewer and i % 4 == 0 and trail_idx < 1000:
             tid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, f"trail_{trail_idx}")
             if tid >= 0:
-                model.site_pos[tid] = data.xpos[hand_id].copy()
+                model.site_pos[tid] = get_ee_position(data, hand_id)
             trail_idx += 1
 
         tau, J_prev, err = ctrl_fn(model, data, hand_id, Xd, Xd_d, Xd_dd, J_prev, dt)
-        # External disturbance torque on joints 1-3 (simulates model uncertainty / payload)
-        if disturbance > 0 and t > 1.0:  # apply after initial convergence
-            d = disturbance * np.sin(2*np.pi*1.5*t)
-            tau[:3] += np.array([d, d, 0.5*d])
+        # External disturbance torque on selected joints (simulates model uncertainty / payload)
+        if dist_vector is not None and t > 1.0:  # apply after initial convergence
+            if dist_is_continuous:
+                tau[:7] += dist_vector  # Continuous (Constant) Disturbance
+            else:
+                tau[:7] += dist_vector * np.sin(2*np.pi*1.5*t)  # Discrete (Oscillating) Disturbance
         data.ctrl[:7] = tau
         mujoco.mj_step(model, data)
         log_t.append(t); log_e.append(err)
@@ -283,6 +289,42 @@ def ask_choice(prompt, options):
             return options[int(val)-1]
         print("    Invalid, try again.")
 
+def ask_disturbance():
+    print("\n  Configure External Disturbance Magnitude (Nm):")
+    choice = ask_choice("Magnitude", [
+        "No Disturbance (0 Nm)",
+        "Default Robustness Test (Joints 1-3: 8, 8, 4 Nm)",
+        "Custom (Manually enter amplitude for all 7 joints)"
+    ])
+    
+    dist_vector = None
+    if choice.startswith("Default"):
+        dist_vector = np.array([8.0, 8.0, 4.0, 0.0, 0.0, 0.0, 0.0])
+    elif not choice.startswith("No"):
+        while True:
+            val = input("    Enter 7 numbers separated by spaces (e.g. 10 0 5 0 0 0 0): ").strip()
+            val = val.replace("'", "").replace('"', "")
+            parts = val.split()
+            if len(parts) == 7:
+                try:
+                    dist_vector = np.array([float(x) for x in parts])
+                    break
+                except ValueError:
+                    print("    Error: Please enter only numbers, not letters.")
+            else:
+                print(f"    Invalid input: You entered {len(parts)} numbers, but exactly 7 are required.")
+
+    dist_is_continuous = False
+    if dist_vector is not None:
+        print("\n  Configure Disturbance Type:")
+        type_choice = ask_choice("Type", [
+            "Continuous (Constant payload / gravity offset)",
+            "Discrete (Oscillating sine wave)"
+        ])
+        dist_is_continuous = type_choice.startswith("Continuous")
+
+    return dist_vector, dist_is_continuous
+
 if __name__ == "__main__":
     print("\n" + "═"*70)
     print("  FL+PD (Baseline)  vs  FL+SMC (Proposed)  vs  VLA (Gemini+SMC)")
@@ -309,8 +351,11 @@ if __name__ == "__main__":
         ctrl_key = "PD" if "PD" in ctrl else "SMC"
         print("\n  Choose shape:")
         shape = ask_choice("Shape", ALL_SHAPES)
+        
+        dist_vector, dist_is_continuous = ask_disturbance()
+        
         print(f"\n  Running {ctrl} on {shape} ...")
-        t, e = run_sim(ctrl_key, shape, T, use_viewer=True)
+        t, e = run_sim(ctrl_key, shape, T, use_viewer=True, dist_vector=dist_vector, dist_is_continuous=dist_is_continuous)
         print(f"  Mean error: {e.mean()*1000:.2f} mm")
         fname = f"error_{ctrl_key.lower()}_{shape}.png"
         plot_single(
@@ -321,21 +366,24 @@ if __name__ == "__main__":
     elif mode_choice == MODES[1]:
         print("\n  Choose shape:")
         shape = ask_choice("Shape", ALL_SHAPES)
+        
+        dist_vector, dist_is_continuous = ask_disturbance()
+        
         res = {}
 
         print(f"\n  [1/3] Baseline (FL+PD) on {shape}...")
-        t1, e1 = run_sim("PD", shape, T, use_viewer=True)
+        t1, e1 = run_sim("PD", shape, T, use_viewer=True, dist_vector=dist_vector, dist_is_continuous=dist_is_continuous)
         res["Baseline (FL+PD)"] = (t1, e1, "dodgerblue", "-")
         print(f"    Mean error: {e1.mean()*1000:.2f} mm")
 
         print(f"\n  [2/3] Proposed (FL+SMC) on {shape}...")
-        t2, e2 = run_sim("SMC", shape, T, use_viewer=True)
+        t2, e2 = run_sim("SMC", shape, T, use_viewer=True, dist_vector=dist_vector, dist_is_continuous=dist_is_continuous)
         res["Proposed (FL+SMC)"] = (t2, e2, "crimson", "-")
         print(f"    Mean error: {e2.mean()*1000:.2f} mm")
 
         print(f"\n  [3/3] VLA (Gemini → FL+SMC) on {shape}...")
         vla_shape = vla_choose_trajectory(SHAPE_PROMPTS[shape])
-        t3, e3 = run_sim("SMC", vla_shape, T, use_viewer=True)
+        t3, e3 = run_sim("SMC", vla_shape, T, use_viewer=True, dist_vector=dist_vector, dist_is_continuous=dist_is_continuous)
         res["VLA (Gemini+FL+SMC)"] = (t3, e3, "forestgreen", "--")
         print(f"    Gemini chose: {vla_shape} | Mean error: {e3.mean()*1000:.2f} mm")
 
@@ -343,7 +391,7 @@ if __name__ == "__main__":
 
     # ── Mode 3: Headless batch — all shapes, nominal + disturbed ──
     elif mode_choice == MODES[2]:
-        DIST_AMP = 8.0  # Nm — disturbance amplitude (bounded, per report)
+        dist_arr = np.array([8.0, 8.0, 4.0, 0.0, 0.0, 0.0, 0.0])
         all_nom, all_dist = {}, {}
 
         for shape in ALL_SHAPES:
@@ -351,11 +399,11 @@ if __name__ == "__main__":
 
             # --- Nominal (no disturbance) ---
             print(f"  [Nominal] Baseline (FL+PD)...")
-            t1, e1 = run_sim("PD", shape, T, use_viewer=False, disturbance=0.0)
+            t1, e1 = run_sim("PD", shape, T, use_viewer=False, dist_vector=None)
             print(f"    Mean error: {e1.mean()*1000:.2f} mm")
 
             print(f"  [Nominal] Proposed (FL+SMC)...")
-            t2, e2 = run_sim("SMC", shape, T, use_viewer=False, disturbance=0.0)
+            t2, e2 = run_sim("SMC", shape, T, use_viewer=False, dist_vector=None)
             print(f"    Mean error: {e2.mean()*1000:.2f} mm")
 
             all_nom[shape] = {
@@ -364,12 +412,12 @@ if __name__ == "__main__":
             }
 
             # --- With external disturbance (Report Sec 2.3) ---
-            print(f"  [Disturbed {DIST_AMP}Nm] Baseline (FL+PD)...")
-            t3, e3 = run_sim("PD", shape, T, use_viewer=False, disturbance=DIST_AMP)
+            print(f"  [Disturbed Default] Baseline (FL+PD)...")
+            t3, e3 = run_sim("PD", shape, T, use_viewer=False, dist_vector=dist_arr)
             print(f"    Mean error: {e3.mean()*1000:.2f} mm")
 
-            print(f"  [Disturbed {DIST_AMP}Nm] Proposed (FL+SMC)...")
-            t4, e4 = run_sim("SMC", shape, T, use_viewer=False, disturbance=DIST_AMP)
+            print(f"  [Disturbed Default] Proposed (FL+SMC)...")
+            t4, e4 = run_sim("SMC", shape, T, use_viewer=False, dist_vector=dist_arr)
             print(f"    Mean error: {e4.mean()*1000:.2f} mm")
 
             all_dist[shape] = {
@@ -414,8 +462,11 @@ if __name__ == "__main__":
     elif mode_choice == MODES[3]:
         cmd = input("\n  Describe what the robot should draw: ")
         shape = vla_choose_trajectory(cmd)
+        
+        dist_vector, dist_is_continuous = ask_disturbance()
+        
         print(f"\n  Gemini chose: {shape}. Running FL+SMC with viewer...")
-        t, e = run_sim("SMC", shape, T, use_viewer=True)
+        t, e = run_sim("SMC", shape, T, use_viewer=True, dist_vector=dist_vector, dist_is_continuous=dist_is_continuous)
         print(f"  Mean error: {e.mean()*1000:.2f} mm")
         plot_single({"VLA (Gemini+FL+SMC)": (t, e, "forestgreen", "-")}, shape, f"vla_{shape}.png")
 
