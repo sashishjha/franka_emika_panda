@@ -136,17 +136,9 @@ CTRL_MAP = {"PD": fl_pd, "SMC": fl_smc}
 # ══════════════════════════════════════════════════════════════════════════════
 SCENE_XML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scene_torque.xml")
 
-def make_arm_transparent(model, alpha=0.25):
-    """Make the robot arm semi-transparent so only the end-effector markers stand out."""
-    for i in range(model.ngeom):
-        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, i) or ""
-        if name == "floor":
-            continue
-        body = model.geom_bodyid[i]
-        bname = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_BODY, body) or ""
-        # Make all robot geoms transparent
-        if bname not in ("world",):
-            model.geom_rgba[i, 3] = alpha
+def make_arm_transparent(model, alpha=1.0):
+    # Left empty so arm remains solid
+    pass
 
 def reset_robot(model, data):
     mujoco.mj_resetData(model, data)
@@ -178,8 +170,7 @@ def run_sim(ctrl_type, traj_name, T_total=8.0, use_viewer=False, dist_vector=Non
     ref_id  = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "ref_target")
     ee_id   = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "ee_marker")
 
-    if use_viewer:
-        make_arm_transparent(model, alpha=0.20)
+    # Removed transparency call to keep arm completely solid
 
     reset_robot(model, data)
     center = get_ee_position(data, hand_id).copy()
@@ -318,10 +309,10 @@ def ask_disturbance():
     if dist_vector is not None:
         print("\n  Configure Disturbance Type:")
         type_choice = ask_choice("Type", [
-            "Continuous (Constant payload / gravity offset)",
-            "Discrete (Oscillating sine wave)"
+            "Constant (A steady, continuous force like a heavy payload)",
+            "Oscillating (A time-varying sine wave force)"
         ])
-        dist_is_continuous = type_choice.startswith("Continuous")
+        dist_is_continuous = type_choice.startswith("Constant")
 
     return dist_vector, dist_is_continuous
 
@@ -449,7 +440,7 @@ if __name__ == "__main__":
             for label, (t, e, c, ls) in all_dist[shape].items():
                 ax.plot(t, e*1000, color=c, linestyle=ls, lw=1.5,
                         label=f"{label} ({e.mean()*1000:.2f}mm)")
-            ax.set_title(f"{shape.title()} (Disturbance {DIST_AMP}Nm)", fontsize=11)
+            ax.set_title(f"{shape.title()} (Disturbed)", fontsize=11)
             ax.set_xlabel("Time (s)"); ax.set_ylabel("Error (mm)")
             ax.legend(fontsize=7); ax.grid(True, alpha=0.3)
 
