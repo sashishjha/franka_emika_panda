@@ -15,6 +15,12 @@
   </asset>
   <worldbody>
     <light pos="0 0 1.5" dir="0 0 -1" directional="true"/>
+    <!-- Fixed RGB viewpoint for vision-language-action policies.  The Python
+         renderer hides debug sites by default, so this camera does not expose
+         the desired-target or end-effector ground-truth overlays. -->
+    <camera name="policy_camera" pos="1.15 -1.15 0.9"
+            xyaxes="0.8041761 0.5943911 0 -0.1961783 0.2654177 0.9439637"
+            fovy="65"/>
     <geom name="floor" size="0 0 0.05" type="plane" material="groundplane"/>
     <!-- Moving red target (desired position) -->
     <site name="ref_target" type="sphere" size="0.015" rgba="1 0 0 1" group="1"/>

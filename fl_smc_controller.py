@@ -1,7 +1,7 @@
 # fl_smc_controller.py
 # Final Project: FL+PD (Baseline) vs FL+SMC (Proposed) vs VLA (Gemini+SMC)
 # Demonstrates SMC robustness under external disturbances (Report Sec 2.3)
-# Run: mjpython fl_smc_controller.py
+# Run: python fl_smc_controller.py
 
 import os, sys, time
 import numpy as np
@@ -10,6 +10,16 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import mujoco
 import mujoco.viewer
+
+from vla import (
+    ActionAdapterConfig,
+    AsyncPolicyRunner,
+    CartesianActionAdapter,
+    ConstantPolicy,
+    PolicyCamera,
+    RemoteOpenVLAPolicy,
+)
+from vla.policy import RemotePolicyConfig
 
 # ══════════════════════════════════════════════════════════════════════════════
 #  TRAJECTORY GENERATORS
@@ -91,6 +101,9 @@ def vla_choose_trajectory(prompt, max_retries=3):
 HOME    = np.array([0.0, -0.785, 0.0, -2.356, 0.0, 1.571, 0.785])
 TAU_MAX = np.array([87, 87, 87, 87, 12, 12, 12], dtype=float)
 EE_OFFSET = np.array([0.0, 0.0, 0.1034])  # Z-offset from hand to fingertips
+# Default policy workspace is intentionally local to the reset pose.  Expand it
+# only after validating a task-specific camera/action calibration.
+POLICY_WORKSPACE_HALF_EXTENTS = np.array([0.25, 0.25, 0.20])
 
 def get_ee_position(data, hand_id):
     return data.xpos[hand_id] + data.xmat[hand_id].reshape(3,3) @ EE_OFFSET
@@ -103,7 +116,8 @@ def get_jacobian(model, data, hand_id, point):
 def _fl_core(model, data, hand_id, a_x, J_prev, dt, point):
     J = get_jacobian(model, data, hand_id, point)
     M = np.zeros((model.nv, model.nv))
-    mujoco.mj_fullM(model, M, data.qM)
+    # MuJoCo 3.x expands the mass matrix directly from MjData.
+    mujoco.mj_fullM(model, data, M)
     h = data.qfrc_bias[:7].copy()
     Jdqd = ((J - J_prev)/dt) @ data.qvel[:7]
     Jp = J.T @ np.linalg.solve(J@J.T + 1e-4*np.eye(3), np.eye(3))
@@ -136,9 +150,6 @@ CTRL_MAP = {"PD": fl_pd, "SMC": fl_smc}
 # ══════════════════════════════════════════════════════════════════════════════
 SCENE_XML = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scene_torque.xml")
 
-def make_arm_transparent(model, alpha=1.0):
-    # Left empty so arm remains solid
-    pass
 
 def reset_robot(model, data):
     mujoco.mj_resetData(model, data)
@@ -161,8 +172,29 @@ def hide_trail(model):
         if sid >= 0:
             model.site_pos[sid] = [0, 0, -10]
 
-def run_sim(ctrl_type, traj_name, T_total=8.0, use_viewer=False, dist_vector=None, dist_is_continuous=False):
-    """Run simulation. dist_vector: 7-element array. dist_is_continuous: True for constant torque, False for sinusoidal."""
+def run_sim(ctrl_type, traj_name=None, T_total=8.0, use_viewer=False,
+            dist_vector=None, dist_is_continuous=False, *, policy=None,
+            instruction=None, policy_hz=5.0, action_adapter=None,
+            observation_callback=None, observation_hz=None):
+    """Run a legacy trajectory or an RGB/language policy-controlled simulation.
+
+    Legacy mode supplies an analytic trajectory through ``traj_name``.  Policy
+    mode supplies a seven-dimensional OpenVLA-style Cartesian action through a
+    non-blocking client, then converts it to the existing controller's 3-D
+    position/velocity/acceleration reference.  It never feeds MuJoCo state to
+    the policy; only the rendered RGB frame and instruction cross that boundary.
+    """
+    if policy is None and traj_name not in TRAJ_MAP:
+        raise ValueError(f"Unknown trajectory {traj_name!r}")
+    if policy is not None:
+        if not instruction or not instruction.strip():
+            raise ValueError("A non-empty language instruction is required in policy mode")
+        if policy_hz <= 0:
+            raise ValueError("policy_hz must be positive")
+    if observation_callback is not None:
+        if observation_hz is None or observation_hz <= 0:
+            raise ValueError("observation_hz must be positive when observation_callback is supplied")
+
     model = mujoco.MjModel.from_xml_path(SCENE_XML)
     data  = mujoco.MjData(model)
     dt    = model.opt.timestep
@@ -170,12 +202,11 @@ def run_sim(ctrl_type, traj_name, T_total=8.0, use_viewer=False, dist_vector=Non
     ref_id  = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "ref_target")
     ee_id   = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, "ee_marker")
 
-    # Removed transparency call to keep arm completely solid
-
     reset_robot(model, data)
     center = get_ee_position(data, hand_id).copy()
-    traj_func = TRAJ_MAP[traj_name]
-    draw_path(model, center, traj_func, T_total)
+    traj_func = TRAJ_MAP[traj_name] if policy is None else None
+    if traj_func is not None:
+        draw_path(model, center, traj_func, T_total)
     hide_trail(model)
 
     ctrl_fn = CTRL_MAP[ctrl_type]
@@ -192,44 +223,102 @@ def run_sim(ctrl_type, traj_name, T_total=8.0, use_viewer=False, dist_vector=Non
     trail_idx = 0
     t0 = time.time()
 
-    for i in range(N):
-        t = i * dt
-        Xd, Xd_d, Xd_dd = traj_func(t, center)
+    policy_camera = None
+    policy_runner = None
+    adapter = None
+    next_policy_request = 0.0
+    next_observation_sample = 0.0
+    last_policy_error = None
+    rotation_notice_printed = False
+    if policy is not None or observation_callback is not None:
+        policy_camera = PolicyCamera(model)
+    if policy is not None:
+        policy_runner = AsyncPolicyRunner(policy)
+        if action_adapter is None:
+            adapter = CartesianActionAdapter(ActionAdapterConfig(
+                workspace_lower=tuple(center - POLICY_WORKSPACE_HALF_EXTENTS),
+                workspace_upper=tuple(center + POLICY_WORKSPACE_HALF_EXTENTS),
+            ))
+        else:
+            adapter = action_adapter
+        adapter.reset(center, gripper_ctrl=float(data.ctrl[7]))
 
-        # Update markers
-        if ref_id >= 0:
-            model.site_pos[ref_id] = Xd
-        if ee_id >= 0:
-            model.site_pos[ee_id] = get_ee_position(data, hand_id)
+    try:
+        for i in range(N):
+            t = i * dt
 
-        # Drop a trail point more frequently to form a continuous line
-        if use_viewer and i % 4 == 0 and trail_idx < 1000:
-            tid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, f"trail_{trail_idx}")
-            if tid >= 0:
-                model.site_pos[tid] = get_ee_position(data, hand_id)
-            trail_idx += 1
-
-        tau, J_prev, err = ctrl_fn(model, data, hand_id, Xd, Xd_d, Xd_dd, J_prev, dt)
-        # External disturbance torque on selected joints (simulates model uncertainty / payload)
-        if dist_vector is not None and t > 1.0:  # apply after initial convergence
-            if dist_is_continuous:
-                tau[:7] += dist_vector  # Continuous (Constant) Disturbance
+            if policy_runner is not None:
+                action = policy_runner.poll()
+                if action is not None:
+                    adapter.update_action(action)
+                if policy_runner.last_error and policy_runner.last_error != last_policy_error:
+                    print(f"  [OpenVLA] Inference failed; holding last safe reference: {policy_runner.last_error}")
+                    last_policy_error = policy_runner.last_error
+                if t >= next_policy_request and not policy_runner.request_in_flight:
+                    policy_runner.submit(policy_camera.render(data), instruction)
+                    next_policy_request = t + 1.0 / policy_hz
+                reference = adapter.step(dt)
+                Xd, Xd_d, Xd_dd = reference.position, reference.velocity, reference.acceleration
+                gripper_ctrl = reference.gripper_ctrl
+                if not rotation_notice_printed and np.linalg.norm(reference.rotation_delta) > 1e-9:
+                    print("  [OpenVLA] Rotation action received but is held because the current controller is translation-only.")
+                    rotation_notice_printed = True
             else:
-                tau[:7] += dist_vector * np.sin(2*np.pi*1.5*t)  # Discrete (Oscillating) Disturbance
-        data.ctrl[:7] = tau
-        mujoco.mj_step(model, data)
-        log_t.append(t); log_e.append(err)
+                Xd, Xd_d, Xd_dd = traj_func(t, center)
+                gripper_ctrl = None
 
-        if viewer and i % 15 == 0:
-            viewer.sync()
-            if not viewer.is_running(): break
-            wall = time.time() - t0
-            if t > wall:
-                time.sleep(t - wall)
+            if observation_callback is not None and t >= next_observation_sample:
+                observation_callback(
+                    t=t,
+                    image=policy_camera.render(data),
+                    desired_position=Xd.copy(),
+                    desired_velocity=Xd_d.copy(),
+                    desired_acceleration=Xd_dd.copy(),
+                    actual_position=get_ee_position(data, hand_id).copy(),
+                )
+                next_observation_sample = t + 1.0 / observation_hz
 
-    if viewer:
-        viewer.close()
-        time.sleep(1.0)
+            # Update debug markers. Policy camera capture hides all sites, so it
+            # cannot use this visualization as a target-state shortcut.
+            if ref_id >= 0:
+                model.site_pos[ref_id] = Xd
+            if ee_id >= 0:
+                model.site_pos[ee_id] = get_ee_position(data, hand_id)
+
+            # Drop a trail point more frequently to form a continuous line.
+            if use_viewer and i % 4 == 0 and trail_idx < 1000:
+                tid = mujoco.mj_name2id(model, mujoco.mjtObj.mjOBJ_SITE, f"trail_{trail_idx}")
+                if tid >= 0:
+                    model.site_pos[tid] = get_ee_position(data, hand_id)
+                trail_idx += 1
+
+            tau, J_prev, err = ctrl_fn(model, data, hand_id, Xd, Xd_d, Xd_dd, J_prev, dt)
+            # External disturbance torque on selected joints (simulates model uncertainty / payload)
+            if dist_vector is not None and t > 1.0:  # apply after initial convergence
+                if dist_is_continuous:
+                    tau[:7] += dist_vector  # Continuous (Constant) Disturbance
+                else:
+                    tau[:7] += dist_vector * np.sin(2*np.pi*1.5*t)  # Discrete (Oscillating) Disturbance
+            data.ctrl[:7] = tau
+            if gripper_ctrl is not None:
+                data.ctrl[7] = gripper_ctrl
+            mujoco.mj_step(model, data)
+            log_t.append(t); log_e.append(err)
+
+            if viewer and i % 15 == 0:
+                viewer.sync()
+                if not viewer.is_running(): break
+                wall = time.time() - t0
+                if t > wall:
+                    time.sleep(t - wall)
+    finally:
+        if policy_runner:
+            policy_runner.close()
+        if policy_camera:
+            policy_camera.close()
+        if viewer:
+            viewer.close()
+            time.sleep(1.0)
     return np.array(log_t), np.array(log_e)
 
 # ══════════════════════════════════════════════════════════════════════════════
@@ -324,7 +413,8 @@ if __name__ == "__main__":
     MODES = ["Run single controller on single shape (with viewer)",
              "Compare all 3 controllers on a chosen shape (with viewer)",
              "Headless: compute all errors for all shapes & generate plots",
-             "VLA interactive (Gemini picks the shape)"]
+             "VLA interactive (Gemini picks the shape)",
+             "RGB + language policy (remote OpenVLA)"]
 
     # Accept mode from CLI: python fl_smc_controller.py 3
     if len(sys.argv) > 1 and sys.argv[1].isdigit() and 1 <= int(sys.argv[1]) <= len(MODES):
@@ -460,5 +550,51 @@ if __name__ == "__main__":
         t, e = run_sim("SMC", shape, T, use_viewer=True, dist_vector=dist_vector, dist_is_continuous=dist_is_continuous)
         print(f"  Mean error: {e.mean()*1000:.2f} mm")
         plot_single({"VLA (Gemini+FL+SMC)": (t, e, "forestgreen", "-")}, shape, f"vla_{shape}.png")
+
+    # ── Mode 5: RGB + language → remote OpenVLA → FL+SMC ──
+    elif mode_choice == MODES[4]:
+        print("\n  This mode renders a fixed policy camera and sends only RGB + language")
+        print("  to a remote OpenVLA service. MuJoCo state remains inside the controller.")
+        cmd = input("\n  Describe the robot action: ").strip()
+        backend = ask_choice("Policy backend", [
+            "Remote OpenVLA service",
+            "Local constant-action smoke test",
+        ])
+        policy_hz_text = os.environ.get("OPENVLA_POLICY_HZ", "5.0")
+        try:
+            policy_hz = float(policy_hz_text)
+            if policy_hz <= 0:
+                raise ValueError
+        except ValueError:
+            print(f"  Invalid OPENVLA_POLICY_HZ={policy_hz_text!r}; using 5.0 Hz.")
+            policy_hz = 5.0
+
+        if backend.startswith("Remote"):
+            endpoint = os.environ.get("OPENVLA_ENDPOINT", "http://127.0.0.1:8000/act")
+            unnorm_key = os.environ.get("OPENVLA_UNNORM_KEY") or None
+            print(f"  OpenVLA endpoint: {endpoint}")
+            if unnorm_key:
+                print(f"  OpenVLA action normalization key: {unnorm_key}")
+            policy = RemoteOpenVLAPolicy(RemotePolicyConfig(
+                endpoint=endpoint,
+                unnorm_key=unnorm_key,
+            ))
+            label = "OpenVLA RGB+Language → FL+SMC"
+        else:
+            # This validates camera capture, asynchronous policy execution, and
+            # Cartesian reference adaptation without needing a cluster service.
+            policy = ConstantPolicy([0.005, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0])
+            label = "Local action smoke test → FL+SMC"
+            print("  Running a fixed +X Cartesian action for integration validation.")
+
+        dist_vector, dist_is_continuous = ask_disturbance()
+        print(f"\n  Running RGB/language policy at {policy_hz:.2f} Hz ...")
+        t, e = run_sim(
+            "SMC", T_total=T, use_viewer=True,
+            dist_vector=dist_vector, dist_is_continuous=dist_is_continuous,
+            policy=policy, instruction=cmd, policy_hz=policy_hz,
+        )
+        print(f"  Mean reference-tracking error: {e.mean()*1000:.2f} mm")
+        plot_single({label: (t, e, "darkviolet", "-")}, "RGB Policy", "openvla_policy_tracking.png")
 
     print("\n  Done!")

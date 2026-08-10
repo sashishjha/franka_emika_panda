@@ -1,0 +1,31 @@
+# Python runtime artifacts
+__pycache__/
+*.py[cod]
+
+# macOS metadata
+.DS_Store
+
+# Generated local VLA demonstrations
+dataset/collected/
+
+# Local model and environment state
+.venv/
+.hf_cache/
+cluster/models/
+
+# SLURM job output logs
+logs/*.out
+logs/*.err
+
+# Generated benchmark plots (re-created by running fl_smc_controller.py mode 3)
+# panda.png is intentionally excluded — it is a static README asset
+comparison_nominal.png
+comparison_disturbed.png
+robustness_comparison.png
+error_*.png
+vla_*.png
+openvla_policy_tracking.png
+comparison_*.png
+
+# Archives
+*.zip

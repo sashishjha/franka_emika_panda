@@ -1,11 +1,11 @@
 # Franka Emika Panda Description (MJCF)
 
+> This repository now also contains a local RGB-to-OpenVLA integration layer
+> for the torque-controlled Panda demo. See [VLA_INTEGRATION.md](VLA_INTEGRATION.md)
+> for the runnable controller, dataset, and RBCCPS deployment workflow.
+
 > [!IMPORTANT]
 > Requires MuJoCo 2.3.3 or later.
-
-## Changelog
-
-See [CHANGELOG.md](./CHANGELOG.md) for a full history of changes.
 
 ## Overview
 

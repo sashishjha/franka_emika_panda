@@ -1,0 +1,10 @@
+# Install torch separately from the RBCCPS-supported ROCm package/module.
+# These pins follow the upstream OpenVLA compatibility guidance.
+accelerate>=0.30          # required by low_cpu_mem_usage=True in from_pretrained
+huggingface-hub>=0.23
+transformers==4.40.1
+tokenizers==0.19.1
+timm==0.9.10
+fastapi>=0.110,<1
+uvicorn>=0.27,<1
+Pillow>=10

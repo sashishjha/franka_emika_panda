@@ -1,0 +1,5 @@
+# Local MacBook/simulator dependencies. OpenVLA itself stays on RBCCPS.
+mujoco>=3.10,<4
+numpy>=2.0
+matplotlib>=3.8
+google-genai>=1.0
